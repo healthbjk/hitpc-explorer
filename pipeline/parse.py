@@ -49,6 +49,8 @@ HEADER_STOPLIST = {
     "healthcare", "technology", "foundation", "university", "corporation",
     "administration", "association", "committee", "moderator", "conclusion",
     "informatics", "nursing", "medicine", "coordinator", "prevention",
+    "health information technology", "information technology",
+    "health information", "public health",
 }
 
 CONNECTORS = {"and", "of", "for", "the", "&", "to", "at", "in", "on"}

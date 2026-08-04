@@ -33,6 +33,7 @@ NAME_ALIASES = {
     "frank nemic": "Frank Nemec",
     "farzad mostashari": "Farzad Mostashari",
     "fazad mostashari": "Farzad Mostashari",
+    "art davidson": "Arthur Davidson",
     "unidentified speaker": "(unidentified)",
     "unidentified male": "(unidentified)",
     "unidentified female": "(unidentified)",

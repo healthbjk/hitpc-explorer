@@ -6,8 +6,8 @@ The committee's original transcripts vanished from public view when ONC reorgani
 
 ## What's inside
 
-- **`hitpc.db`** — SQLite database: 75 meetings, 23,298 speaker-attributed utterances (2.6M words), 361 normalized speakers, keyword topic tags, and full-text search (FTS5). Includes synthesized position analyses for 8 key members (Judy Faulkner/Epic, Neal Patterson/Cerner, Paul Tang, Deven McGraw, Micky Tripathi, Christine Bechtel, Gayle Harrell, David Lansky, Paul Egerman) and a narrative of how the NHIN/HIE debate evolved — every quote verified against the transcripts.
-- **`app.py`** — Streamlit app: speaker leaderboards and drill-downs, a Judy Faulkner/Epic deep-dive, topic trend charts (watch NHIN die in real time), full-text search, and a meeting browser.
+- **`hitpc.db`** — SQLite database: 75 meetings, 23,299 speaker-attributed utterances (2.6M words), 357 normalized speakers, keyword topic tags, and full-text search (FTS5). Includes **29 per-speaker position analyses** — committee members (Judy Faulkner/Epic, Neal Patterson/Cerner, Paul Tang, Deven McGraw, Micky Tripathi, Christine Bechtel, Gayle Harrell, David Lansky, Paul Egerman, Larry Wolf, Neil Calman, Marc Probst, David Bates, Charles Kennedy, George Hripcsak, John Lumpkin, Arthur Davidson, Theresa Cullen…) and the ONC/CMS officials who ran the program (Blumenthal, Mostashari, DeSalvo, Daniel, Fridsma, Posnack, Anthony…) — plus a narrative of how the NHIN/HIE debate evolved. Every quote was checked against the transcripts.
+- **`app.py`** — Streamlit app: **Speakers** (leaderboard → per-person record: activity vs the committee average, topic mix, position analysis, every quote, and how others referred to them), **Topics** (trend charts — watch NHIN die in real time), **Search** (full-text), and **Meetings & Transcripts** (full transcript of any meeting, downloadable, with a link back to the original ONC source).
 - **`pipeline/`** — the full reproducible pipeline: Wayback CDX discovery (`collect_hitpc_corpus.py`), text extraction, transcript parsing (three transcription-vendor grammars), speaker normalization, and topic tagging.
 
 ## Run it

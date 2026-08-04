@@ -30,7 +30,8 @@ CREATE TABLE meetings (
     date TEXT NOT NULL,
     filename TEXT NOT NULL,
     n_utterances INTEGER,
-    n_words INTEGER
+    n_words INTEGER,
+    source_url TEXT          -- original ONC URL, from the Wayback manifest
 );
 CREATE TABLE speakers (
     id INTEGER PRIMARY KEY,
@@ -94,6 +95,19 @@ def pick_canonical(files):
     return chosen, skipped
 
 
+def source_urls():
+    """local filename -> original ONC url, from the corpus download manifest."""
+    import csv as _csv
+    path = Path(__file__).resolve().parent.parent / "hitpc_corpus" / "manifest.csv"
+    if not path.exists():
+        return {}
+    out = {}
+    with open(path, newline="") as f:
+        for row in _csv.DictReader(f):
+            out[Path(row["local_path"]).name] = row["original_url"]
+    return out
+
+
 def main():
     files = extract_all()
     chosen, skipped = pick_canonical(files)
@@ -120,11 +134,13 @@ def main():
         )
         speaker_ids[key] = cur.lastrowid
 
+    urls = source_urls()
     for d, name, utts in parsed:
         n_words = sum(len(t.split()) for _r, t in utts)
         cur = con.execute(
-            "INSERT INTO meetings (date, filename, n_utterances, n_words) VALUES (?,?,?,?)",
-            (d.isoformat(), name, len(utts), n_words),
+            "INSERT INTO meetings (date, filename, n_utterances, n_words, source_url)"
+            " VALUES (?,?,?,?,?)",
+            (d.isoformat(), name, len(utts), n_words, urls.get(name)),
         )
         mid = cur.lastrowid
         for seq, (raw, text) in enumerate(utts):

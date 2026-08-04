@@ -31,6 +31,16 @@ TOPIC_LABELS = {
     "vendor_mention": "Other vendors (mentions)",
 }
 
+# Org words too generic to use as a "mentioned by others" search term.
+GENERIC_ORG_WORDS = {
+    "office", "national", "center", "centre", "university", "health",
+    "healthcare", "department", "foundation", "group", "association",
+    "institute", "partners", "state", "federal", "coordinator", "services",
+    "systems", "corporation", "medical", "public", "school", "college",
+    "hospital", "of", "for", "the", "and", "&", "business", "technology",
+    "information", "policy", "research", "advisory", "society", "council",
+}
+
 
 @st.cache_resource
 def get_con():
@@ -42,11 +52,19 @@ def q(sql, params=()):
     return pd.read_sql_query(sql, get_con(), params=params)
 
 
-def year_of(date_str):
-    return date_str[:4]
+@st.cache_data
+def n_meetings():
+    return int(q("SELECT COUNT(*) c FROM meetings").c[0])
 
 
-# ---------------------------------------------------------------- utterance UI
+def bar(df, value, label, height_per=26, min_height=120):
+    return alt.Chart(df).mark_bar().encode(
+        x=alt.X(f"{value}:Q", title=None),
+        y=alt.Y(f"{label}:N", sort="-x", title=None,
+                axis=alt.Axis(labelLimit=320, labelOverlap=False)),
+        tooltip=[label, value],
+    ).properties(height=max(min_height, height_per * len(df)))
+
 
 def show_utterances(df, page_size=25, key="utt"):
     """Render utterances with speaker, meeting date, text."""
@@ -55,12 +73,15 @@ def show_utterances(df, page_size=25, key="utt"):
         st.info("No utterances match.")
         return
     pages = (total - 1) // page_size + 1
-    page = st.number_input(
-        f"Page (of {pages}, {total} utterances)", 1, pages, 1, key=key + "_pg")
+    page = 1
+    if pages > 1:
+        page = st.number_input(
+            f"Page (of {pages:,} — {total:,} utterances)", 1, pages, 1, key=key + "_pg")
+    else:
+        st.caption(f"{total:,} utterance{'s' if total != 1 else ''}")
     view = df.iloc[(page - 1) * page_size: page * page_size]
     for _, r in view.iterrows():
-        st.markdown(
-            f"**{r['name']}** ({r['org']}) — *{r['date']}*  \n{r['text']}")
+        st.markdown(f"**{r['name']}** ({r['org']}) — *{r['date']}*  \n{r['text']}")
         st.divider()
 
 
@@ -68,25 +89,30 @@ def show_utterances(df, page_size=25, key="utt"):
 
 def page_overview():
     st.title("HIT Policy Committee — Transcript Explorer")
+    st.caption(
+        "75 full-committee meetings, May 2009 – November 2015, recovered from the "
+        "Internet Archive after ONC retired the original pages.")
     m = q("SELECT * FROM meetings ORDER BY date")
     stats = q("""SELECT (SELECT COUNT(*) FROM meetings) meetings,
                         (SELECT COUNT(*) FROM speakers) speakers,
                         (SELECT COUNT(*) FROM utterances) utterances,
-                        (SELECT SUM(word_count) FROM utterances) words""")
-    c1, c2, c3, c4 = st.columns(4)
+                        (SELECT SUM(word_count) FROM utterances) words,
+                        (SELECT COUNT(*) FROM speaker_summaries) analyses""")
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Meetings", int(stats.meetings[0]))
     c2.metric("Speakers", int(stats.speakers[0]))
     c3.metric("Utterances", f"{int(stats.utterances[0]):,}")
     c4.metric("Words", f"{int(stats.words[0]):,}")
+    c5.metric("Position analyses", int(stats.analyses[0]))
 
     st.subheader("Meetings over time")
     m["date"] = pd.to_datetime(m["date"])
-    chart = alt.Chart(m).mark_bar().encode(
-        x=alt.X("date:T", title="Meeting date"),
-        y=alt.Y("n_words:Q", title="Words in transcript"),
-        tooltip=["date:T", "filename", "n_utterances", "n_words"],
-    ).properties(height=250)
-    st.altair_chart(chart, width="stretch")
+    st.altair_chart(
+        alt.Chart(m).mark_bar().encode(
+            x=alt.X("date:T", title="Meeting date"),
+            y=alt.Y("n_words:Q", title="Words in transcript"),
+            tooltip=["date:T", "filename", "n_utterances", "n_words"],
+        ).properties(height=250), width="stretch")
 
     st.subheader("Most active speakers (words spoken, non-ONC)")
     top = q("""
@@ -94,21 +120,22 @@ def page_overview():
         FROM utterances u JOIN speakers s ON s.id=u.speaker_id
         WHERE s.is_onc_staff=0 AND s.name != '(unidentified)'
         GROUP BY s.id ORDER BY words DESC LIMIT 20""")
-    st.altair_chart(
-        alt.Chart(top).mark_bar().encode(
-            x=alt.X("words:Q", title="Total words"),
-            y=alt.Y("speaker:N", sort="-x", title=None,
-                    axis=alt.Axis(labelLimit=320, labelOverlap=False)),
-        ).properties(height=26 * len(top)),
-        width="stretch")
+    st.altair_chart(bar(top, "words", "speaker"), width="stretch")
+    st.caption("Open the **Speakers** page for per-person analysis, quotes and topic mix.")
 
 
 def page_speakers():
     st.title("Speakers")
+    st.caption(
+        "Pick anyone to see their record: activity over time, topic mix, every "
+        "quote, how others referred to them, and — for 30 key figures — a "
+        "position analysis grounded in their own words.")
+
     years = q("SELECT DISTINCT substr(date,1,4) y FROM meetings ORDER BY y")["y"].tolist()
-    c1, c2 = st.columns([2, 1])
+    c1, c2, c3 = st.columns([1.4, 1, 1])
     year = c1.selectbox("Year", ["All"] + years)
-    hide_onc = c2.toggle("Hide ONC staff/moderators", value=True)
+    hide_onc = c2.toggle("Hide ONC staff", value=True, key="hide_onc")
+    only_analyzed = c3.toggle("Only with analysis", value=False)
 
     where = "WHERE s.name != '(unidentified)'"
     params = []
@@ -117,144 +144,150 @@ def page_speakers():
         params.append(year)
     if hide_onc:
         where += " AND s.is_onc_staff=0"
+    if only_analyzed:
+        where += " AND EXISTS (SELECT 1 FROM speaker_summaries ss WHERE ss.speaker_key=s.key)"
 
     lb = q(f"""
-        SELECT s.id, s.name, s.org, COUNT(*) utterances, SUM(u.word_count) words,
+        SELECT s.id, s.name, s.org,
+               CASE WHEN EXISTS (SELECT 1 FROM speaker_summaries ss
+                                 WHERE ss.speaker_key=s.key) THEN '✓' ELSE '' END AS analysis,
+               COUNT(*) utterances, SUM(u.word_count) words,
                COUNT(DISTINCT u.meeting_id) meetings
         FROM utterances u
         JOIN speakers s ON s.id=u.speaker_id
         JOIN meetings m ON m.id=u.meeting_id
         {where}
-        GROUP BY s.id ORDER BY words DESC LIMIT 100""", params)
-    st.dataframe(lb.drop(columns=["id"]), width="stretch", height=350)
+        GROUP BY s.id ORDER BY words DESC LIMIT 150""", params)
+    if lb.empty:
+        st.info("No speakers match these filters.")
+        return
+    st.dataframe(lb.drop(columns=["id"]), width="stretch", height=300, hide_index=True)
 
-    st.subheader("Speaker detail")
-    options = lb["name"] + " — " + lb["org"]
-    pick = st.selectbox("Choose a speaker", options)
-    if pick:
-        sid = int(lb.iloc[options.tolist().index(pick)]["id"])
-        detail_speaker(sid)
+    st.divider()
+    options = (lb["name"] + " — " + lb["org"]).tolist()
+    pick = st.selectbox("Speaker", options, index=0)
+    detail_speaker(int(lb.iloc[options.index(pick)]["id"]))
+
+
+def default_mention_terms(name, org):
+    terms = [name.split()[-1]] if name else []
+    for tok in re.split(r"[\s,/&]+", org or ""):
+        tok = tok.strip(".")
+        if len(tok) > 3 and tok.lower() not in GENERIC_ORG_WORDS and tok[0].isupper():
+            terms.append(tok)
+            break
+        if tok.isupper() and 2 <= len(tok) <= 5 and tok.lower() not in GENERIC_ORG_WORDS:
+            terms.append(tok)
+            break
+    return ", ".join(dict.fromkeys(terms))
 
 
 def detail_speaker(sid):
+    info = q("SELECT id, key, name, org, is_onc_staff FROM speakers WHERE id=?", (sid,)).iloc[0]
+    st.header(f"{info['name']}")
+    st.caption(f"{info['org']}" + ("  ·  ONC/HHS staff" if info["is_onc_staff"] else ""))
+
+    stats = q("""
+        SELECT COUNT(*) utts, SUM(word_count) words,
+               COUNT(DISTINCT meeting_id) mtgs
+        FROM utterances WHERE speaker_id=?""", (sid,)).iloc[0]
+    span = q("""SELECT MIN(m.date) a, MAX(m.date) b FROM utterances u
+                JOIN meetings m ON m.id=u.meeting_id WHERE u.speaker_id=?""", (sid,)).iloc[0]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Utterances", f"{int(stats.utts):,}")
+    c2.metric("Words", f"{int(stats.words):,}")
+    c3.metric("Meetings", f"{int(stats.mtgs)} / {n_meetings()}")
+    c4.metric("Active", f"{span.a[:7]} → {span.b[:7]}")
+
     note = q("""SELECT ss.content FROM speaker_summaries ss
                 JOIN speakers s ON s.key = ss.speaker_key WHERE s.id=?""", (sid,))
     if not note.empty:
-        with st.expander("Position analysis (LLM synthesis)", expanded=False):
+        with st.expander("📋 Position analysis — themes, quotes, evolution", expanded=True):
             st.markdown(note.content[0])
-    tl = q("""
-        SELECT m.date, SUM(u.word_count) words, COUNT(*) utts
-        FROM utterances u JOIN meetings m ON m.id=u.meeting_id
-        WHERE u.speaker_id=? GROUP BY m.date ORDER BY m.date""", (sid,))
-    tl["date"] = pd.to_datetime(tl["date"])
-    st.altair_chart(
-        alt.Chart(tl).mark_bar().encode(
-            x=alt.X("date:T"), y=alt.Y("words:Q", title="Words per meeting"),
-            tooltip=["date:T", "words", "utts"]).properties(height=200),
-        width="stretch")
+    else:
+        st.caption(
+            "No position analysis for this speaker yet — the analyses cover the "
+            "30 most substantive voices.")
 
-    topics = q("""
-        SELECT ut.topic, COUNT(*) n FROM utterance_topics ut
-        JOIN utterances u ON u.id=ut.utterance_id
-        WHERE u.speaker_id=? GROUP BY ut.topic ORDER BY n DESC""", (sid,))
-    topics["topic"] = topics["topic"].map(lambda t: TOPIC_LABELS.get(t, t))
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        st.markdown("**Topic mix** (tagged utterances)")
-        st.dataframe(topics, width="stretch", height=300, hide_index=True)
-    with c2:
-        st.markdown("**Utterances** (longest first)")
-        utts = q("""
-            SELECT s.name, s.org, m.date, u.text
-            FROM utterances u
-            JOIN meetings m ON m.id=u.meeting_id
-            JOIN speakers s ON s.id=u.speaker_id
-            WHERE u.speaker_id=? ORDER BY u.word_count DESC LIMIT 500""", (sid,))
-        show_utterances(utts, key=f"spk{sid}")
+    left, right = st.columns([3, 2])
+    with left:
+        st.subheader("Speaking volume vs committee average")
+        vol = q("""
+            SELECT m.date,
+              SUM(CASE WHEN u.speaker_id=? THEN u.word_count ELSE 0 END) speaker,
+              SUM(u.word_count) * 1.0 / MAX(1, (
+                 SELECT COUNT(DISTINCT u2.speaker_id) FROM utterances u2
+                 JOIN speakers s2 ON s2.id = u2.speaker_id
+                 WHERE u2.meeting_id=m.id AND s2.is_onc_staff=0
+                       AND s2.name != '(unidentified)')) avg_member
+            FROM utterances u JOIN meetings m ON m.id=u.meeting_id
+            GROUP BY m.id ORDER BY m.date""", (sid,))
+        vol["date"] = pd.to_datetime(vol["date"])
+        long = vol.melt("date", ["speaker", "avg_member"], "series", "words")
+        long["series"] = long["series"].map(
+            {"speaker": info["name"], "avg_member": "Avg member (per speaker)"})
+        st.altair_chart(
+            alt.Chart(long).mark_line(point=True).encode(
+                x=alt.X("date:T", title=None),
+                y=alt.Y("words:Q", title="Words"),
+                color=alt.Color("series:N", title=None,
+                                legend=alt.Legend(orient="top")),
+                tooltip=["date:T", "series", "words"]).properties(height=260),
+            width="stretch")
+    with right:
+        st.subheader("Topic mix")
+        topics = q("""
+            SELECT ut.topic, COUNT(*) n FROM utterance_topics ut
+            JOIN utterances u ON u.id=ut.utterance_id
+            WHERE u.speaker_id=? GROUP BY ut.topic ORDER BY n DESC""", (sid,))
+        if topics.empty:
+            st.info("No topic-tagged utterances.")
+        else:
+            topics["topic"] = topics["topic"].map(lambda t: TOPIC_LABELS.get(t, t))
+            st.altair_chart(bar(topics, "n", "topic", height_per=22, min_height=260),
+                            width="stretch")
 
-
-def page_faulkner():
-    st.title("Judy Faulkner / Epic — Deep Dive")
-    frow = q("SELECT id FROM speakers WHERE key LIKE '%faulkner%'")
-    if frow.empty:
-        st.error("Faulkner not found in speaker table.")
-        return
-    fid = int(frow.id[0])
-
-    stats = q("""
-        SELECT COUNT(*) utts, SUM(word_count) words, COUNT(DISTINCT meeting_id) mtgs
-        FROM utterances WHERE speaker_id=?""", (fid,))
-    n_m = int(q("SELECT COUNT(*) c FROM meetings").c[0])
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Utterances", f"{int(stats.utts[0]):,}")
-    c2.metric("Words", f"{int(stats.words[0]):,}")
-    c3.metric("Meetings attended (spoke)", f"{int(stats.mtgs[0])} / {n_m}")
-
-    st.subheader("Speaking volume vs committee average")
-    vol = q("""
-        SELECT m.date,
-          SUM(CASE WHEN u.speaker_id=? THEN u.word_count ELSE 0 END) faulkner,
-          SUM(u.word_count) * 1.0 / MAX(1, (
-             SELECT COUNT(DISTINCT u2.speaker_id) FROM utterances u2
-             JOIN speakers s2 ON s2.id = u2.speaker_id
-             WHERE u2.meeting_id=m.id AND s2.is_onc_staff=0
-                   AND s2.name != '(unidentified)')) avg_member
-        FROM utterances u JOIN meetings m ON m.id=u.meeting_id
-        GROUP BY m.id ORDER BY m.date""", (fid,))
-    vol["date"] = pd.to_datetime(vol["date"])
-    long = vol.melt("date", ["faulkner", "avg_member"], "series", "words")
-    long["series"] = long["series"].map(
-        {"faulkner": "Faulkner", "avg_member": "Avg member (per speaker)"})
-    st.altair_chart(
-        alt.Chart(long).mark_line(point=True).encode(
-            x="date:T", y=alt.Y("words:Q", title="Words"),
-            color=alt.Color("series:N", title=None),
-            tooltip=["date:T", "series", "words"]).properties(height=250),
-        width="stretch")
-
-    st.subheader("What she talked about")
-    topics = q("""
-        SELECT ut.topic, COUNT(*) n FROM utterance_topics ut
-        JOIN utterances u ON u.id=ut.utterance_id
-        WHERE u.speaker_id=? GROUP BY ut.topic ORDER BY n DESC""", (fid,))
-    topics["topic"] = topics["topic"].map(lambda t: TOPIC_LABELS.get(t, t))
-    st.altair_chart(
-        alt.Chart(topics).mark_bar().encode(
-            x=alt.X("n:Q", title="Tagged utterances"),
-            y=alt.Y("topic:N", sort="-x", title=None,
-                    axis=alt.Axis(labelLimit=320, labelOverlap=False)),
-        ).properties(height=max(120, 26 * len(topics))),
-        width="stretch")
-
-    tab1, tab2, tab3 = st.tabs(
-        ["Her utterances", "Epic mentioned by others", "LLM position summaries"])
-    with tab1:
-        kw = st.text_input("Filter her remarks by keyword (optional)")
+    t1, t2, t3 = st.tabs(["Their remarks", "Mentioned by others", "Meeting-by-meeting"])
+    with t1:
+        c1, c2 = st.columns([3, 1])
+        kw = c1.text_input("Filter by keyword", key=f"kw{sid}",
+                           placeholder="e.g. interoperability, standards, patient")
+        min_words = c2.number_input("Min words", 0, 500, 25, 25, key=f"mw{sid}")
         sql = """
             SELECT s.name, s.org, m.date, u.text FROM utterances u
             JOIN meetings m ON m.id=u.meeting_id
             JOIN speakers s ON s.id=u.speaker_id
-            WHERE u.speaker_id=? AND u.word_count >= 20"""
-        params = [fid]
+            WHERE u.speaker_id=? AND u.word_count >= ?"""
+        params = [sid, int(min_words)]
         if kw:
             sql += " AND u.text LIKE ?"
             params.append(f"%{kw}%")
         sql += " ORDER BY m.date, u.seq"
-        show_utterances(q(sql, params), key="faulk")
-    with tab2:
-        others = q("""
-            SELECT s.name, s.org, m.date, u.text FROM utterances u
-            JOIN utterance_topics ut ON ut.utterance_id=u.id AND ut.topic='epic_mention'
-            JOIN meetings m ON m.id=u.meeting_id
-            JOIN speakers s ON s.id=u.speaker_id
-            WHERE u.speaker_id != ? ORDER BY m.date""", (fid,))
-        show_utterances(others, key="epicoth")
-    with tab3:
-        notes = q("SELECT content FROM analysis_notes WHERE kind='faulkner_positions' ORDER BY id DESC LIMIT 1")
-        if notes.empty:
-            st.info("Run the LLM pass (pipeline/llm_pass.py) to generate position summaries.")
+        show_utterances(q(sql, params), key=f"spk{sid}")
+    with t2:
+        default = default_mention_terms(info["name"], info["org"])
+        terms = st.text_input(
+            "Search other speakers' remarks for (comma-separated)",
+            value=default, key=f"mt{sid}",
+            help="Defaults to their surname and a distinctive word from their organization.")
+        term_list = [t.strip() for t in terms.split(",") if t.strip()]
+        if not term_list:
+            st.info("Enter a term to search.")
         else:
-            st.markdown(notes.content[0])
+            clause = " OR ".join(["u.text LIKE ?"] * len(term_list))
+            show_utterances(q(f"""
+                SELECT s.name, s.org, m.date, u.text FROM utterances u
+                JOIN meetings m ON m.id=u.meeting_id
+                JOIN speakers s ON s.id=u.speaker_id
+                WHERE u.speaker_id != ? AND u.word_count >= 15 AND ({clause})
+                ORDER BY m.date, u.seq""",
+                [sid] + [f"%{t}%" for t in term_list]), key=f"men{sid}")
+    with t3:
+        per = q("""
+            SELECT m.date, COUNT(*) utterances, SUM(u.word_count) words
+            FROM utterances u JOIN meetings m ON m.id=u.meeting_id
+            WHERE u.speaker_id=? GROUP BY m.id ORDER BY m.date""", (sid,))
+        st.dataframe(per, width="stretch", height=420, hide_index=True)
 
 
 def page_topics():
@@ -276,17 +309,18 @@ def page_topics():
     trend["topic"] = trend["topic"].map(lambda t: TOPIC_LABELS.get(t, t))
     st.altair_chart(
         alt.Chart(trend).mark_line(point=True).encode(
-            x="date:T", y=alt.Y("n:Q", title="Utterances mentioning topic"),
-            color=alt.Color("topic:N", title=None),
-            tooltip=["date:T", "topic", "n"]).properties(height=300),
-        width="stretch")
+            x=alt.X("date:T", title=None),
+            y=alt.Y("n:Q", title="Utterances mentioning topic"),
+            color=alt.Color("topic:N", title=None, legend=alt.Legend(orient="top")),
+            tooltip=["date:T", "topic", "n"]).properties(height=300), width="stretch")
 
     focus = st.selectbox("Drill into topic", picks, format_func=lambda t: TOPIC_LABELS[t])
     if focus in ("nhin", "hie"):
         arc = q("SELECT content FROM analysis_notes WHERE kind='nhin_arc' ORDER BY id DESC LIMIT 1")
         if not arc.empty:
-            with st.expander("How the NHIN/HIE debate evolved (LLM synthesis)", expanded=False):
+            with st.expander("How the NHIN/HIE debate evolved, 2009–2015", expanded=False):
                 st.markdown(arc.content[0])
+
     st.subheader(f"Top speakers on {TOPIC_LABELS[focus]}")
     top = q("""
         SELECT s.name || ' — ' || s.org speaker, COUNT(*) n
@@ -295,29 +329,24 @@ def page_topics():
         JOIN speakers s ON s.id=u.speaker_id
         WHERE ut.topic=? AND s.name != '(unidentified)'
         GROUP BY s.id ORDER BY n DESC LIMIT 15""", (focus,))
-    st.altair_chart(
-        alt.Chart(top).mark_bar().encode(
-            x=alt.X("n:Q", title="Utterances"),
-            y=alt.Y("speaker:N", sort="-x", title=None,
-                    axis=alt.Axis(labelLimit=320, labelOverlap=False)),
-        ).properties(height=max(120, 26 * len(top))),
-        width="stretch")
+    st.altair_chart(bar(top, "n", "speaker"), width="stretch")
 
     st.subheader("Utterances")
-    utts = q("""
+    show_utterances(q("""
         SELECT s.name, s.org, m.date, u.text
         FROM utterance_topics ut
         JOIN utterances u ON u.id=ut.utterance_id
         JOIN meetings m ON m.id=u.meeting_id
         JOIN speakers s ON s.id=u.speaker_id
-        WHERE ut.topic=? AND u.word_count>=20 ORDER BY m.date""", (focus,))
-    show_utterances(utts, key=f"topic_{focus}")
+        WHERE ut.topic=? AND u.word_count>=20 ORDER BY m.date""", (focus,)),
+        key=f"topic_{focus}")
 
 
 def page_search():
     st.title("Full-Text Search")
-    query = st.text_input("Search transcripts (FTS5 syntax: AND/OR/NEAR, \"phrases\")",
-                          placeholder='e.g. "information blocking" OR "data blocking"')
+    query = st.text_input(
+        "Search 23,000 utterances (FTS5: AND/OR/NEAR, \"quoted phrases\")",
+        placeholder='e.g. "information blocking" OR "data blocking"')
     c1, c2 = st.columns(2)
     speaker_filter = c1.text_input("Speaker name contains (optional)")
     year_filter = c2.selectbox(
@@ -348,46 +377,62 @@ def page_search():
 
 
 def page_meetings():
-    st.title("Meetings")
-    m = q("SELECT id, date, filename, n_utterances, n_words FROM meetings ORDER BY date")
-    pick = st.selectbox("Meeting", m["date"] + "  (" + m["n_words"].astype(str) + " words)")
-    mid = int(m.iloc[(m["date"] + "  (" + m["n_words"].astype(str) + " words)").tolist().index(pick)]["id"])
+    st.title("Meetings & Full Transcripts")
+    m = q("""SELECT id, date, filename, n_utterances, n_words, source_url
+             FROM meetings ORDER BY date""")
+    labels = m["date"] + "   (" + m["n_words"].map("{:,}".format) + " words)"
+    pick = st.selectbox("Meeting", labels.tolist())
+    row = m.iloc[labels.tolist().index(pick)]
+    mid = int(row["id"])
 
-    summ = q("SELECT summary FROM meeting_summaries WHERE meeting_id=?", (mid,))
-    if not summ.empty:
-        st.subheader("Summary")
-        st.markdown(summ.summary[0])
-    else:
-        st.caption("No LLM summary yet — run pipeline/llm_pass.py.")
-
-    st.subheader("Participants")
-    parts = q("""
-        SELECT s.name, s.org, COUNT(*) utterances, SUM(u.word_count) words
-        FROM utterances u JOIN speakers s ON s.id=u.speaker_id
-        WHERE u.meeting_id=? GROUP BY s.id ORDER BY words DESC""", (mid,))
-    st.dataframe(parts, width="stretch", height=300, hide_index=True)
-
-    st.subheader("Transcript")
     utts = q("""
         SELECT s.name, s.org, m.date, u.text
         FROM utterances u
         JOIN meetings m ON m.id=u.meeting_id
         JOIN speakers s ON s.id=u.speaker_id
         WHERE u.meeting_id=? ORDER BY u.seq""", (mid,))
+
+    c1, c2, c3 = st.columns([1.2, 1.2, 2])
+    c1.metric("Utterances", f"{int(row['n_utterances']):,}")
+    c2.metric("Words", f"{int(row['n_words']):,}")
+    plain = f"HIT Policy Committee — {row['date']}\n\n" + "\n\n".join(
+        f"{r['name']} ({r['org']}):\n{r['text']}" for _, r in utts.iterrows())
+    c3.download_button("⬇ Download full transcript (.txt)", plain,
+                       file_name=f"hitpc_{row['date']}.txt", mime="text/plain")
+    if row["source_url"]:
+        st.caption(f"Source: [original ONC file]({row['source_url']}) "
+                   f"· archived copy: `{row['filename']}`")
+
+    summ = q("SELECT summary FROM meeting_summaries WHERE meeting_id=?", (mid,))
+    if not summ.empty:
+        st.subheader("Summary")
+        st.markdown(summ.summary[0])
+
+    st.subheader("Participants")
+    st.dataframe(q("""
+        SELECT s.name, s.org, COUNT(*) utterances, SUM(u.word_count) words
+        FROM utterances u JOIN speakers s ON s.id=u.speaker_id
+        WHERE u.meeting_id=? GROUP BY s.id ORDER BY words DESC""", (mid,)),
+        width="stretch", height=280, hide_index=True)
+
+    st.subheader("Full transcript")
     show_utterances(utts, page_size=50, key=f"mtg{mid}")
 
 
 PAGES = {
     "Overview": page_overview,
     "Speakers": page_speakers,
-    "Faulkner / Epic": page_faulkner,
     "Topics": page_topics,
     "Search": page_search,
-    "Meetings": page_meetings,
+    "Meetings & Transcripts": page_meetings,
 }
 
 choice = st.sidebar.radio("Page", list(PAGES))
+st.sidebar.divider()
 st.sidebar.caption(
     "HIT Policy Committee transcripts 2009–2015, recovered from the Wayback "
-    "Machine. Built from hitpc.db — see pipeline/.")
+    "Machine after ONC retired the original pages. Public U.S. government "
+    "records (FACA proceedings).\n\n"
+    "Position analyses are LLM-written from each speaker's own remarks; every "
+    "quote was checked against the transcripts.")
 PAGES[choice]()
