@@ -43,6 +43,31 @@ def parse_meeting_date(filename):
     return None
 
 
+MONTHS = {m: i for i, m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december"], 1)}
+STATED_DATE_RE = re.compile(
+    r"\b(january|february|march|april|may|june|july|august|september|october"
+    r"|november|december)\s+(\d{1,2}),?\s+(20\d{2})\b", re.I)
+
+
+def stated_meeting_date(text, head_chars=4000):
+    """The meeting date printed in the transcript's own header block.
+
+    Authoritative where it disagrees with the filename: ONC filenames
+    sometimes carry the publication date instead of the meeting date, and at
+    least one is simply mistyped (a January 2012 transcript named 2011-01-10).
+    """
+    from collections import Counter
+    counts = Counter()
+    for mo, dy, yr in STATED_DATE_RE.findall(text[:head_chars]):
+        try:
+            counts[date(int(yr), MONTHS[mo.lower()], int(dy))] += 1
+        except ValueError:
+            continue
+    return counts.most_common(1)[0][0] if counts else None
+
+
 def extract_pdf(path):
     out = subprocess.run(
         ["pdftotext", str(path), "-"],

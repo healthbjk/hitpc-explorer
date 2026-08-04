@@ -12,7 +12,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from .extract import extract_all
+from .extract import extract_all, stated_meeting_date
 from .parse import parse_utterances
 from .speakers import SpeakerRegistry
 from .topics import tag
@@ -108,8 +108,21 @@ def source_urls():
     return out
 
 
+def resolve_dates(files):
+    """Prefer the meeting date printed inside the transcript over the one in
+    the filename; report every correction."""
+    out = []
+    for name, file_date, path in files:
+        stated = stated_meeting_date(path.read_text(encoding="utf8"))
+        if stated and stated != file_date:
+            print(f"  date corrected {file_date} -> {stated}  ({name[:58]})",
+                  file=sys.stderr)
+        out.append((name, stated or file_date, path))
+    return out
+
+
 def main():
-    files = extract_all()
+    files = resolve_dates(extract_all())
     chosen, skipped = pick_canonical(files)
     print(f"{len(files)} files -> {len(chosen)} unique meetings "
           f"({len(skipped)} draft/duplicate versions skipped)", file=sys.stderr)

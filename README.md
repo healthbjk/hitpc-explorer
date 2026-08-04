@@ -30,8 +30,23 @@ The app runs entirely off the committed `hitpc.db` — no other data needed.
 
 Requires `pdftotext` (poppler) on PATH for step 2.
 
+## How the counts reconcile
+
+**105 files ≠ 105 meetings.** The Wayback sweep recovered 105 transcript files. ONC published most meetings twice (draft + final) and the Archive captured some documents at several timestamps, so 26 dates carry more than one file — 30 extras in all. Collapsing them yields **75 unique meetings** (finals preferred over drafts).
+
+**Dates come from the transcript, not the filename.** Every meeting date is verified against the date printed inside the document. 73 of 75 agreed; two were corrected:
+
+| Filename | Actual | Cause |
+|---|---|---|
+| `2009-05-27` | **2009-05-11** | Filename carried the publication date. This is the committee's first meeting. |
+| `2011-01-10` | **2012-01-10** | Mistyped by ONC — Robert Anthony's remarks in it recap "how we closed 2011". |
+
+**Coverage.** May 2009 – November 2015, roughly monthly: 2009: 5 · 2010: 13 · 2011: 12 · 2012: 13 · 2013: 11 · 2014: 11 · 2015: 10. A few meetings announced in the *Federal Register* (e.g. 2009-12-15, 2010-05-19, 2010-09-28) have no transcript surviving at the URLs the Archive captured; `hitpc_meetings_checklist.csv` and `hitpc_fr_index.csv` hold the notice index used for that check.
+
+**Attendance is measured against tenure.** A speaker's "meetings spoke at" is out of the meetings held between their first and last recorded remark, not out of all 75, because most members served only part of the committee's life. Judy Faulkner spoke at **52 of the 59** meetings during her 2009–2014 tenure (88%).
+
 ## Notes
 
 - Transcripts are public U.S. government records (FACA committee proceedings).
 - Speaker attribution is parsed from transcript headers; name variants are normalized (e.g., "Judy Faulkner, Epic" = "Judith Faulkner, MS – EPIC Systems Corporation"). Roll-call one-liners are retained but easy to filter by word count.
-- One meeting file's parsed date (2009-05-27) reflects its publication date; the meeting occurred 2009-05-11.
+- Three transcription-vendor grammars appear across the corpus (em-dash headers, comma headers, and bare-name headers); the parser detects which is in use per file.

@@ -123,6 +123,38 @@ def page_overview():
     st.altair_chart(bar(top, "words", "speaker"), width="stretch")
     st.caption("Open the **Speakers** page for per-person analysis, quotes and topic mix.")
 
+    with st.expander("How this corpus was built — and how the counts reconcile"):
+        st.markdown(f"""
+**{q("SELECT COUNT(*) c FROM meetings").c[0]} meetings from 105 files.** The Wayback sweep recovered
+**105 transcript files**, but that is a file count, not a meeting count. ONC
+published most meetings twice (a *draft* and a *final* transcript), and the
+Internet Archive captured some documents at several different timestamps.
+Collapsing those leaves **75 unique meetings**: 26 dates had more than one
+file, accounting for the 30 extras. Where a draft and a final exist, the
+final is used.
+
+**Dates come from the transcript, not the filename.** Every meeting date was
+checked against the date printed inside the document. 73 of 75 agreed; the two
+that did not were corrected:
+
+| Filename says | Transcript says | What happened |
+|---|---|---|
+| 2009-05-27 | **2009-05-11** | Filename carried the publication date. This is the committee's first meeting. |
+| 2011-01-10 | **2012-01-10** | Mistyped by ONC. Robert Anthony's remarks in it recap "how we closed 2011". |
+
+**Known gaps.** The corpus covers May 2009 – November 2015. Coverage is
+roughly monthly and thickest in 2010–2013; a handful of meetings announced in
+the *Federal Register* (e.g. 2009-12-15, 2010-05-19, 2010-09-28) have no
+surviving transcript at the URLs the Archive captured. Meetings per year:
+2009: 5 · 2010: 13 · 2011: 12 · 2012: 13 · 2013: 11 · 2014: 11 · 2015: 10.
+
+**Attendance is measured against tenure.** On a speaker's page, "meetings
+spoke at" is out of the meetings held between their first and last recorded
+remark — not out of all 75 — because most members served only part of the
+committee's life. Judy Faulkner, for instance, spoke at **52 of the 59**
+meetings held during her 2009–2014 tenure (88%), not 52 of 75.
+""")
+
 
 def page_speakers():
     st.title("Speakers")
@@ -193,10 +225,18 @@ def detail_speaker(sid):
         FROM utterances WHERE speaker_id=?""", (sid,)).iloc[0]
     span = q("""SELECT MIN(m.date) a, MAX(m.date) b FROM utterances u
                 JOIN meetings m ON m.id=u.meeting_id WHERE u.speaker_id=?""", (sid,)).iloc[0]
+    # Denominator is meetings held during their own tenure, not the whole
+    # corpus: most members served only part of the committee's 2009-2015 life.
+    tenure = int(q("SELECT COUNT(*) c FROM meetings WHERE date BETWEEN ? AND ?",
+                   (span.a, span.b)).c[0])
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Utterances", f"{int(stats.utts):,}")
     c2.metric("Words", f"{int(stats.words):,}")
-    c3.metric("Meetings", f"{int(stats.mtgs)} / {n_meetings()}")
+    c3.metric("Meetings spoke at", f"{int(stats.mtgs)} of {tenure}",
+              help=f"Meetings held between their first and last recorded remark "
+                   f"({int(100*stats.mtgs/max(1,tenure))}% attendance). The full "
+                   f"corpus has {n_meetings()} meetings; most members served only "
+                   f"part of the committee's 2009–2015 life.")
     c4.metric("Active", f"{span.a[:7]} → {span.b[:7]}")
 
     note = q("""SELECT ss.content FROM speaker_summaries ss
