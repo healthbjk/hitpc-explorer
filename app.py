@@ -57,6 +57,31 @@ def n_meetings():
     return int(q("SELECT COUNT(*) c FROM meetings").c[0])
 
 
+@st.cache_data
+def staff_col():
+    """Name of the staff flag. Renamed is_onc_staff -> is_gov_staff when the
+    flag grew to cover CMS; tolerate either so the app still runs if the
+    deployed database lags behind the code."""
+    cols = {r[1] for r in get_con().execute("PRAGMA table_info(speakers)")}
+    if "is_gov_staff" in cols:
+        return "is_gov_staff"
+    return "is_onc_staff" if "is_onc_staff" in cols else "0"
+
+
+@st.cache_data
+def has_table(name):
+    return bool(get_con().execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone())
+
+
+def analysis_exists_sql(alias="s"):
+    """SQL fragment testing whether a speaker has a position analysis."""
+    if not has_table("speaker_summaries"):
+        return "0"
+    return (f"EXISTS (SELECT 1 FROM speaker_summaries ss "
+            f"WHERE ss.speaker_key={alias}.key)")
+
+
 def bar(df, value, label, height_per=26, min_height=120):
     return alt.Chart(df).mark_bar().encode(
         x=alt.X(f"{value}:Q", title=None),
@@ -96,14 +121,15 @@ def page_overview():
     stats = q("""SELECT (SELECT COUNT(*) FROM meetings) meetings,
                         (SELECT COUNT(*) FROM speakers) speakers,
                         (SELECT COUNT(*) FROM utterances) utterances,
-                        (SELECT SUM(word_count) FROM utterances) words,
-                        (SELECT COUNT(*) FROM speaker_summaries) analyses""")
+                        (SELECT SUM(word_count) FROM utterances) words""")
+    n_analyses = (int(q("SELECT COUNT(*) c FROM speaker_summaries").c[0])
+                  if has_table("speaker_summaries") else 0)
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Meetings", int(stats.meetings[0]))
     c2.metric("Speakers", int(stats.speakers[0]))
     c3.metric("Utterances", f"{int(stats.utterances[0]):,}")
     c4.metric("Words", f"{int(stats.words[0]):,}")
-    c5.metric("Position analyses", int(stats.analyses[0]))
+    c5.metric("Position analyses", n_analyses)
 
     st.subheader("Meetings over time")
     m["date"] = pd.to_datetime(m["date"])
@@ -125,7 +151,8 @@ def page_overview():
     metric = c1.radio("Rank by", list(METRICS), horizontal=True, key="ov_metric")
     incl_staff = c2.toggle("Include ONC/CMS staff", value=False, key="ov_staff")
     col, expr = METRICS[metric]
-    where = "WHERE s.name != '(unidentified)'" + ("" if incl_staff else " AND s.is_gov_staff=0")
+    where = "WHERE s.name != '(unidentified)'" + (
+        "" if incl_staff else f" AND s.{staff_col()}=0")
     top = q(f"""
         SELECT s.name || ' — ' || s.org AS speaker, ROUND({expr}) {col}
         FROM utterances u JOIN speakers s ON s.id=u.speaker_id
@@ -193,14 +220,13 @@ def page_speakers():
         where += " AND substr(m.date,1,4)=?"
         params.append(year)
     if hide_onc:
-        where += " AND s.is_gov_staff=0"
+        where += f" AND s.{staff_col()}=0"
     if only_analyzed:
-        where += " AND EXISTS (SELECT 1 FROM speaker_summaries ss WHERE ss.speaker_key=s.key)"
+        where += f" AND {analysis_exists_sql()}"
 
     lb = q(f"""
         SELECT s.id, s.name, s.org,
-               CASE WHEN EXISTS (SELECT 1 FROM speaker_summaries ss
-                                 WHERE ss.speaker_key=s.key) THEN '✓' ELSE '' END AS analysis,
+               CASE WHEN {analysis_exists_sql()} THEN '✓' ELSE '' END AS analysis,
                COUNT(*) utterances, SUM(u.word_count) words,
                COUNT(DISTINCT u.meeting_id) meetings
         FROM utterances u
@@ -233,9 +259,10 @@ def default_mention_terms(name, org):
 
 
 def detail_speaker(sid):
-    info = q("SELECT id, key, name, org, is_gov_staff FROM speakers WHERE id=?", (sid,)).iloc[0]
+    info = q(f"SELECT id, key, name, org, {staff_col()} AS gov_staff"
+             " FROM speakers WHERE id=?", (sid,)).iloc[0]
     st.header(f"{info['name']}")
-    st.caption(f"{info['org']}" + ("  ·  ONC/HHS staff" if info["is_gov_staff"] else ""))
+    st.caption(f"{info['org']}" + ("  ·  ONC/CMS staff" if info["gov_staff"] else ""))
 
     stats = q("""
         SELECT COUNT(*) utts, SUM(word_count) words,
@@ -258,7 +285,8 @@ def detail_speaker(sid):
     c4.metric("Active", f"{span.a[:7]} → {span.b[:7]}")
 
     note = q("""SELECT ss.content FROM speaker_summaries ss
-                JOIN speakers s ON s.key = ss.speaker_key WHERE s.id=?""", (sid,))
+                JOIN speakers s ON s.key = ss.speaker_key WHERE s.id=?""",
+             (sid,)) if has_table("speaker_summaries") else pd.DataFrame()
     if not note.empty:
         with st.expander("📋 Position analysis — themes, quotes, evolution", expanded=True):
             st.markdown(note.content[0])
@@ -270,13 +298,13 @@ def detail_speaker(sid):
     left, right = st.columns([3, 2])
     with left:
         st.subheader("Speaking volume vs committee average")
-        vol = q("""
+        vol = q(f"""
             SELECT m.date,
               SUM(CASE WHEN u.speaker_id=? THEN u.word_count ELSE 0 END) speaker,
               SUM(u.word_count) * 1.0 / MAX(1, (
                  SELECT COUNT(DISTINCT u2.speaker_id) FROM utterances u2
                  JOIN speakers s2 ON s2.id = u2.speaker_id
-                 WHERE u2.meeting_id=m.id AND s2.is_gov_staff=0
+                 WHERE u2.meeting_id=m.id AND s2.{staff_col()}=0
                        AND s2.name != '(unidentified)')) avg_member
             FROM utterances u JOIN meetings m ON m.id=u.meeting_id
             GROUP BY m.id ORDER BY m.date""", (sid,))
