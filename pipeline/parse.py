@@ -51,6 +51,9 @@ HEADER_STOPLIST = {
     "informatics", "nursing", "medicine", "coordinator", "prevention",
     "health information technology", "information technology",
     "health information", "public health",
+    # sentence fragments that a wrapped header can strand on their own line
+    "so", "officer", "okay", "thanks", "thank you", "yes", "no", "right",
+    "well", "and", "but", "director", "chair", "vice",
 }
 
 CONNECTORS = {"and", "of", "for", "the", "&", "to", "at", "in", "on"}
@@ -88,9 +91,13 @@ def _looks_like_dash_header(line):
         return None
     if name.lower() in HEADER_STOPLIST:
         return None
-    # Name tokens (before any credential comma) must be capitalized words,
-    # which rejects prose fragments like "Okay. I think".
-    for tok in name.split(",")[0].split():
+    # The name proper (before any credential comma) must read like "First
+    # Last": at least two capitalized tokens. This rejects prose that happens
+    # to contain a dash, e.g. "So, again, here I have – the website ...".
+    core = name.split(",")[0].split()
+    if len(core) < 2 or core[0].lower() in HEADER_STOPLIST:
+        return None
+    for tok in core:
         if not (tok[0].isupper() or tok in ("van", "de", "von")):
             return None
     # Segments after the name shouldn't read like prose (sentences with

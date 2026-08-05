@@ -114,14 +114,29 @@ def page_overview():
             tooltip=["date:T", "filename", "n_utterances", "n_words"],
         ).properties(height=250), width="stretch")
 
-    st.subheader("Most active speakers (words spoken, non-ONC)")
-    top = q("""
-        SELECT s.name || ' — ' || s.org AS speaker, SUM(u.word_count) words
+    st.subheader("Most active speakers")
+    c1, c2 = st.columns([2, 1])
+    METRICS = {
+        "Total words spoken": ("words", "SUM(u.word_count)"),
+        "Number of times they spoke": ("times_spoke", "COUNT(*)"),
+        "Words per meeting attended":
+            ("words_per_meeting", "SUM(u.word_count)*1.0/COUNT(DISTINCT u.meeting_id)"),
+    }
+    metric = c1.radio("Rank by", list(METRICS), horizontal=True, key="ov_metric")
+    incl_staff = c2.toggle("Include ONC/CMS staff", value=False, key="ov_staff")
+    col, expr = METRICS[metric]
+    where = "WHERE s.name != '(unidentified)'" + ("" if incl_staff else " AND s.is_gov_staff=0")
+    top = q(f"""
+        SELECT s.name || ' — ' || s.org AS speaker, ROUND({expr}) {col}
         FROM utterances u JOIN speakers s ON s.id=u.speaker_id
-        WHERE s.is_onc_staff=0 AND s.name != '(unidentified)'
-        GROUP BY s.id ORDER BY words DESC LIMIT 20""")
-    st.altair_chart(bar(top, "words", "speaker"), width="stretch")
-    st.caption("Open the **Speakers** page for per-person analysis, quotes and topic mix.")
+        {where} GROUP BY s.id ORDER BY {col} DESC LIMIT 20""")
+    st.altair_chart(bar(top, col, "speaker"), width="stretch")
+    st.caption(
+        "**Word counts favour long presentations and whoever chairs the meeting.** "
+        "Switch to *number of times they spoke* for a different picture: Judy "
+        "Faulkner is 11th by words but 5th by interventions — she spoke up often, "
+        "in short bursts (64 words on average). Open **Speakers** for per-person "
+        "analysis, quotes and topic mix.")
 
     with st.expander("How this corpus was built — and how the counts reconcile"):
         st.markdown(f"""
@@ -166,7 +181,10 @@ def page_speakers():
     years = q("SELECT DISTINCT substr(date,1,4) y FROM meetings ORDER BY y")["y"].tolist()
     c1, c2, c3 = st.columns([1.4, 1, 1])
     year = c1.selectbox("Year", ["All"] + years)
-    hide_onc = c2.toggle("Hide ONC staff", value=True, key="hide_onc")
+    hide_onc = c2.toggle("Hide ONC/CMS staff", value=True, key="hide_onc",
+                         help="Hides the ONC, HHS and CMS officials who ran the "
+                              "programme and briefed the committee. Federal "
+                              "committee *members* (e.g. VHA) are not hidden.")
     only_analyzed = c3.toggle("Only with analysis", value=False)
 
     where = "WHERE s.name != '(unidentified)'"
@@ -175,7 +193,7 @@ def page_speakers():
         where += " AND substr(m.date,1,4)=?"
         params.append(year)
     if hide_onc:
-        where += " AND s.is_onc_staff=0"
+        where += " AND s.is_gov_staff=0"
     if only_analyzed:
         where += " AND EXISTS (SELECT 1 FROM speaker_summaries ss WHERE ss.speaker_key=s.key)"
 
@@ -215,9 +233,9 @@ def default_mention_terms(name, org):
 
 
 def detail_speaker(sid):
-    info = q("SELECT id, key, name, org, is_onc_staff FROM speakers WHERE id=?", (sid,)).iloc[0]
+    info = q("SELECT id, key, name, org, is_gov_staff FROM speakers WHERE id=?", (sid,)).iloc[0]
     st.header(f"{info['name']}")
-    st.caption(f"{info['org']}" + ("  ·  ONC/HHS staff" if info["is_onc_staff"] else ""))
+    st.caption(f"{info['org']}" + ("  ·  ONC/HHS staff" if info["is_gov_staff"] else ""))
 
     stats = q("""
         SELECT COUNT(*) utts, SUM(word_count) words,
@@ -258,7 +276,7 @@ def detail_speaker(sid):
               SUM(u.word_count) * 1.0 / MAX(1, (
                  SELECT COUNT(DISTINCT u2.speaker_id) FROM utterances u2
                  JOIN speakers s2 ON s2.id = u2.speaker_id
-                 WHERE u2.meeting_id=m.id AND s2.is_onc_staff=0
+                 WHERE u2.meeting_id=m.id AND s2.is_gov_staff=0
                        AND s2.name != '(unidentified)')) avg_member
             FROM utterances u JOIN meetings m ON m.id=u.meeting_id
             GROUP BY m.id ORDER BY m.date""", (sid,))

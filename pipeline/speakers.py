@@ -34,6 +34,8 @@ NAME_ALIASES = {
     "farzad mostashari": "Farzad Mostashari",
     "fazad mostashari": "Farzad Mostashari",
     "art davidson": "Arthur Davidson",
+    "michelle consolazio nelson": "Michelle Consolazio",  # married name mid-tenure
+    "kenneth beutow": "Kenneth Buetow",
     "unidentified speaker": "(unidentified)",
     "unidentified male": "(unidentified)",
     "unidentified female": "(unidentified)",
@@ -54,8 +56,15 @@ NICKNAMES = {
 ORG_RULES = [
     (re.compile(r"\bepic\b", re.I), "Epic"),
     (re.compile(r"\bcerner\b", re.I), "Cerner"),
-    (re.compile(r"office of the national coordinator|\bonc\b", re.I), "ONC"),
-    (re.compile(r"centers for medicare|\bcms\b", re.I), "CMS"),
+    # ONC appears under many labels: the office, its sub-offices, and the
+    # National Coordinator post itself (Blumenthal/Mostashari/DeSalvo).
+    (re.compile(r"office of the national coordinator|\bonc\b"
+                r"|national coordinator"
+                r"|office of (policy|planning|the chief privacy)"
+                r"|federal advisory committee program"
+                r"|^office of the\b", re.I), "ONC"),
+    # CMS's Office of E-Health Standards & Services ran the incentive program.
+    (re.compile(r"centers for medicare|\bcms\b|office of e-?health", re.I), "CMS"),
     (re.compile(r"department of hhs|health (and|&) human services|\bhhs\b", re.I), "HHS"),
     (re.compile(r"veterans (affairs|administration)|\bva\b(?!\w)", re.I), "VA"),
     (re.compile(r"centers for disease|\bcdc\b", re.I), "CDC"),
@@ -91,6 +100,9 @@ ORG_RULES = [
     (re.compile(r"lupus", re.I), "Lupus Foundation of America"),
     (re.compile(r"national cancer|\bnci\b", re.I), "NCI"),
     (re.compile(r"altarum", re.I), "Altarum"),
+    (re.compile(r"national quality|\bnqf\b", re.I), "National Quality Forum"),
+    (re.compile(r"indiana university", re.I), "Indiana University CLEAR"),
+    (re.compile(r"cornerstone", re.I), "Cornerstone Health Care"),
 ]
 
 TITLE_WORDS = {
@@ -136,9 +148,13 @@ def split_header(raw):
     if len(segs) >= 2:
         name = _clean_name(segs[0])
         rest = segs[1:]
-        # Pick the segment that reads least like a job title as the org.
-        rest_sorted = sorted(rest, key=_title_score)
-        return name, rest_sorted[0]
+        # Headers carry name/title/org in no fixed order and sometimes list
+        # several. Prefer a segment naming an organization we recognize;
+        # otherwise fall back to whichever reads least like a job title.
+        for seg in rest:
+            if any(rx.search(seg) for rx, _canon in ORG_RULES):
+                return name, seg
+        return name, sorted(rest, key=_title_score)[0]
     # Comma style: "Judy Sparrow, ONC"
     if "," in raw:
         name_part, org_part = raw.split(",", 1)
@@ -168,6 +184,18 @@ class SpeakerRegistry:
             return f"{first} {last}"
         return low
 
+    @staticmethod
+    def _usable_org(org):
+        """Reject fragments left behind when a long org name wrapped onto the
+        next line ("Office of the", "National") so a complete variant wins."""
+        if not org or len(org) < 3:
+            return False
+        toks = org.split()
+        if toks[-1].lower() in {"of", "the", "for", "and", "&", "in", "on", "at", "to"}:
+            return False
+        return not (len(toks) == 1 and toks[0].lower() in
+                    {"national", "office", "center", "department", "university"})
+
     def observe(self, raw_header):
         from collections import Counter
         name, org = split_header(raw_header)
@@ -175,19 +203,33 @@ class SpeakerRegistry:
         rec = self.people.setdefault(key, {"names": Counter(), "orgs": Counter()})
         rec["names"][name] += 1
         if org:
-            rec["orgs"][normalize_org(org)] += 1
+            canon = normalize_org(org)
+            if self._usable_org(canon):
+                rec["orgs"][canon] += 1
         return key
 
     def resolve(self):
-        """key -> (canonical display name, canonical org, is_onc_staff)."""
+        """key -> (canonical display name, canonical org, is_gov_staff).
+
+        is_gov_staff marks ONC/HHS/CMS program staff and contractors — the
+        officials who ran the incentive program and briefed the committee —
+        as distinct from its appointed members. Federal *members* (e.g. VHA,
+        CDC) are not staff and stay unflagged.
+        """
         out = {}
+        low_key_alias = {v.lower(): v for v in NAME_ALIASES.values()}
         for key, rec in self.people.items():
-            low_key_alias = {v.lower(): v for v in NAME_ALIASES.values()}
             if key in low_key_alias:
                 display = low_key_alias[key]
             else:
                 display = rec["names"].most_common(1)[0][0]
-            org = rec["orgs"].most_common(1)[0][0] if rec["orgs"] else ""
-            is_staff = org in ("ONC", "HHS", "Altarum")
+            # Line-wrapping in the source PDFs truncates long org names, so a
+            # speaker can accumulate both a recognized org and a fragment of a
+            # job title. Prefer a canonical organization over an unrecognized
+            # string, then fall back to the most frequent.
+            known = {canon for _rx, canon in ORG_RULES}
+            org = max(rec["orgs"].items(),
+                      key=lambda kv: (kv[0] in known, kv[1]))[0] if rec["orgs"] else ""
+            is_staff = org in ("ONC", "HHS", "CMS", "Altarum")
             out[key] = (display, org, is_staff)
         return out

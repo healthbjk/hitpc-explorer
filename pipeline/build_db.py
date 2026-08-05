@@ -38,7 +38,7 @@ CREATE TABLE speakers (
     key TEXT UNIQUE,
     name TEXT,
     org TEXT,
-    is_onc_staff INTEGER DEFAULT 0
+    is_gov_staff INTEGER DEFAULT 0
 );
 CREATE TABLE utterances (
     id INTEGER PRIMARY KEY,
@@ -142,7 +142,7 @@ def main():
     speaker_ids = {}
     for key, (display, org, staff) in sorted(resolved.items()):
         cur = con.execute(
-            "INSERT INTO speakers (key, name, org, is_onc_staff) VALUES (?,?,?,?)",
+            "INSERT INTO speakers (key, name, org, is_gov_staff) VALUES (?,?,?,?)",
             (key, display, org, int(staff)),
         )
         speaker_ids[key] = cur.lastrowid
