@@ -178,6 +178,10 @@ class SpeakerRegistry:
         if low in NAME_ALIASES:
             return NAME_ALIASES[low].lower()
         toks = low.split()
+        # Drop a leading initial so "J. Marc Overhage" keys the same as
+        # "Marc Overhage" (people appear both ways across transcripts).
+        if len(toks) > 2 and len(toks[0].rstrip(".")) == 1:
+            toks = toks[1:]
         if len(toks) >= 2:
             first, last = toks[0], toks[-1]
             first = NICKNAMES.get(first, first)
