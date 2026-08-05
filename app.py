@@ -3,6 +3,7 @@
 Run:  .venv/bin/streamlit run app.py
 """
 
+import hashlib
 import re
 import sqlite3
 from pathlib import Path
@@ -82,6 +83,29 @@ def analysis_exists_sql(alias="s"):
             f"WHERE ss.speaker_key={alias}.key)")
 
 
+# ------------------------------------------------------------- citable links
+#
+# Permalinks key on meeting date + a hash of the utterance text rather than a
+# row id, because row ids are reassigned every time the corpus is reparsed.
+# A quote cited in an article keeps working as long as its words do.
+
+def utt_hash(text):
+    return hashlib.sha1(re.sub(r"\s+", " ", text).strip().encode()).hexdigest()[:10]
+
+
+def permalink(date, text=None):
+    return f"?m={date}&h={utt_hash(text)}" if text is not None else f"?m={date}"
+
+
+def speaker_link(key):
+    return f"?speaker={key.replace(' ', '+')}"
+
+
+def qp(name, default=None):
+    v = st.query_params.get(name, default)
+    return v[0] if isinstance(v, list) else v
+
+
 def bar(df, value, label, height_per=26, min_height=120):
     return alt.Chart(df).mark_bar().encode(
         x=alt.X(f"{value}:Q", title=None),
@@ -91,7 +115,7 @@ def bar(df, value, label, height_per=26, min_height=120):
     ).properties(height=max(min_height, height_per * len(df)))
 
 
-def show_utterances(df, page_size=25, key="utt"):
+def show_utterances(df, page_size=25, key="utt", start_page=None):
     """Render utterances with speaker, meeting date, text."""
     total = len(df)
     if total == 0:
@@ -101,12 +125,17 @@ def show_utterances(df, page_size=25, key="utt"):
     page = 1
     if pages > 1:
         page = st.number_input(
-            f"Page (of {pages:,} — {total:,} utterances)", 1, pages, 1, key=key + "_pg")
+            f"Page (of {pages:,} — {total:,} utterances)", 1, pages,
+            min(start_page or 1, pages), key=key + "_pg")
     else:
         st.caption(f"{total:,} utterance{'s' if total != 1 else ''}")
     view = df.iloc[(page - 1) * page_size: page * page_size]
     for _, r in view.iterrows():
         st.markdown(f"**{r['name']}** ({r['org']}) — *{r['date']}*  \n{r['text']}")
+        st.markdown(
+            f"<a href='{permalink(r['date'], r['text'])}' target='_self' "
+            f"style='font-size:0.8em;opacity:0.6;text-decoration:none'>🔗 link to this quote</a>",
+            unsafe_allow_html=True)
         st.divider()
 
 
@@ -241,7 +270,11 @@ def page_speakers():
 
     st.divider()
     options = (lb["name"] + " — " + lb["org"]).tolist()
-    pick = st.selectbox("Speaker", options, index=0)
+    # ?speaker=<key> deep link, e.g. ?speaker=judith+faulkner
+    want = (qp("speaker") or "").replace("+", " ").strip().lower()
+    idx = next((i for i, k in enumerate(lb["id"])
+                if want and q("SELECT key FROM speakers WHERE id=?", (int(k),)).key[0] == want), 0)
+    pick = st.selectbox("Speaker", options, index=idx)
     detail_speaker(int(lb.iloc[options.index(pick)]["id"]))
 
 
@@ -432,6 +465,7 @@ def page_search():
     st.title("Full-Text Search")
     query = st.text_input(
         "Search 23,000 utterances (FTS5: AND/OR/NEAR, \"quoted phrases\")",
+        value=qp("q", ""),
         placeholder='e.g. "information blocking" OR "data blocking"')
     c1, c2 = st.columns(2)
     speaker_filter = c1.text_input("Speaker name contains (optional)")
@@ -466,9 +500,11 @@ def page_meetings():
     st.title("Meetings & Full Transcripts")
     m = q("""SELECT id, date, filename, n_utterances, n_words, source_url
              FROM meetings ORDER BY date""")
-    labels = m["date"] + "   (" + m["n_words"].map("{:,}".format) + " words)"
-    pick = st.selectbox("Meeting", labels.tolist())
-    row = m.iloc[labels.tolist().index(pick)]
+    labels = (m["date"] + "   (" + m["n_words"].map("{:,}".format) + " words)").tolist()
+    want = qp("m")                       # ?m=YYYY-MM-DD deep link
+    idx = next((i for i, d in enumerate(m["date"]) if d == want), 0)
+    pick = st.selectbox("Meeting", labels, index=idx)
+    row = m.iloc[labels.index(pick)]
     mid = int(row["id"])
 
     utts = q("""
@@ -488,6 +524,22 @@ def page_meetings():
     if row["source_url"]:
         st.caption(f"Source: [original ONC file]({row['source_url']}) "
                    f"· archived copy: `{row['filename']}`")
+    st.caption(f"Permalink to this meeting: `?m={row['date']}`")
+
+    # ?h=<hash> cites one specific remark within the meeting.
+    cited = qp("h")
+    jump_page = None
+    if cited:
+        hits = [i for i, t in enumerate(utts["text"]) if utt_hash(t) == cited]
+        if hits:
+            i = hits[0]
+            r = utts.iloc[i]
+            st.success(f"**Cited remark — {r['name']} ({r['org']}), {r['date']}**\n\n{r['text']}")
+            jump_page = i // 50 + 1
+        else:
+            st.warning(
+                "That quote link no longer resolves — the transcript may have "
+                "been reparsed since it was created. The full meeting is below.")
 
     summ = q("SELECT summary FROM meeting_summaries WHERE meeting_id=?", (mid,))
     if not summ.empty:
@@ -502,7 +554,7 @@ def page_meetings():
         width="stretch", height=280, hide_index=True)
 
     st.subheader("Full transcript")
-    show_utterances(utts, page_size=50, key=f"mtg{mid}")
+    show_utterances(utts, page_size=50, key=f"mtg{mid}", start_page=jump_page)
 
 
 PAGES = {
@@ -513,7 +565,12 @@ PAGES = {
     "Meetings & Transcripts": page_meetings,
 }
 
-choice = st.sidebar.radio("Page", list(PAGES))
+_pages = list(PAGES)
+_default = ("Meetings & Transcripts" if qp("m") else
+            "Speakers" if qp("speaker") else
+            "Search" if qp("q") else
+            qp("page") if qp("page") in PAGES else "Overview")
+choice = st.sidebar.radio("Page", _pages, index=_pages.index(_default))
 st.sidebar.divider()
 st.sidebar.caption(
     "HIT Policy Committee transcripts 2009–2015, recovered from the Wayback "
